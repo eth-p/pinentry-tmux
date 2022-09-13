@@ -34,6 +34,12 @@ while read -r pinentry_program; do
 	break
 done < <(which -a pinentry)
 
+# If TMUX is not running, then call the pinentry program directly.
+if [[ -z "${TMUX:-}" ]] && ! tmux display-message -p '' &>/dev/null; then
+	"$pinentry_program"
+	exit $?
+fi
+
 # Make a FIFO to communicate with the popup.
 tempdir=$(mktemp -u)
 mkdir "$tempdir" -m 700

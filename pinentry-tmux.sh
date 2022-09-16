@@ -9,15 +9,23 @@ if [[ "${PINENTRY_TMUX_POPUP:-}" = 1 ]]; then
 
 	# Redirect STDIN and STDOUT.
 	exec 1>"${PINENTRY_TMUX_STDOUT}" 0<"${PINENTRY_TMUX_STDIN}"
+	unset PINENTRY_TMUX_POPUP
+	unset PINENTRY_TMUX_STDIN
+	unset PINENTRY_TMUX_STDOUT
 	unset TMUX_TMPDIR
 	unset TMUX
 
-	# Call the real pinentry.
-	"${PINENTRY_TMUX_PROGRAM}" --ttyname="${popup_tty}"
-	result=$?
+	# Trap SIGINT to return an error message.
+	trap 'echo "ERR 83886179 Operation cancelled <Pinentry-Tmux>"' INT
 
-	rm "${PINENTRY_TMUX_STDOUT}"
-	exit $result
+	# Call the real pinentry.
+	# Force the TTY type to xterm for compatibility.
+	"${PINENTRY_TMUX_PROGRAM}" \
+		--ttyname="${popup_tty}" \
+		--ttytype="xterm" \
+		--lc-ctype="${LC_CTYPE:-c}"
+
+	exit $?
 fi
 
 # -----------------------------------------------------------------------------
@@ -26,7 +34,7 @@ fi
 set -euo pipefail
 
 # If a pinentry program has not already been specified via the 
-# PINENTRY_TMUX_PROGRAMG environment variable, look within the path for any
+# PINENTRY_TMUX_PROGRAM environment variable, look within the path for any
 # executable named "pinentry".
 if [ -z "${PINENTRY_TMUX_PROGRAM:-}" ]; then
 	while read -r pinentry_program; do
@@ -46,27 +54,41 @@ if [[ -z "${TMUX:-}" ]] && ! tmux display-message -p '' &>/dev/null; then
 fi
 
 # Make a FIFO to communicate with the popup.
-tempdir=$(mktemp -u)
-mkdir -m 700 "$tempdir"
-PINENTRY_TMUX_STDOUT="$tempdir/r2t.sock"; mkfifo "$PINENTRY_TMUX_STDOUT"
-PINENTRY_TMUX_STDIN="$tempdir/t2r.sock";  mkfifo "$PINENTRY_TMUX_STDIN"
+fifodir=$(mktemp -u)
+mkdir -m 700 "$fifodir"
+PINENTRY_TMUX_STDOUT="$fifodir/r2t.sock"; mkfifo "$PINENTRY_TMUX_STDOUT"
+PINENTRY_TMUX_STDIN="$fifodir/t2r.sock";  mkfifo "$PINENTRY_TMUX_STDIN"
 
 # Traps and cleanup.
 cleanup() {
 	if [ -e "$PINENTRY_TMUX_STDOUT" ]; then rm "$PINENTRY_TMUX_STDOUT"; fi 
 	if [ -e "$PINENTRY_TMUX_STDIN"  ]; then rm "$PINENTRY_TMUX_STDIN";  fi
-	if [ -d "$tempdir" ]; then rmdir "$tempdir"; fi
+	if [ -d "$fifodir" ]; then rmdir "$fifodir"; fi
 
-	if kill -0 "$pid_popup" &>/dev/null; then tmux display-popup -C; fi
-	if kill -0 "$pid_in_sock" &>/dev/null; then kill -INT "$pid_in_sock"; fi
+	if [ -n "${pid_popup:-}" ]   && kill -0 "$pid_popup" &>/dev/null; then tmux display-popup -C; fi
+	if [ -n "${pid_in_sock:-}" ] && kill -0 "$pid_in_sock" &>/dev/null; then kill -INT "$pid_in_sock"; fi
 }
 
 trap cleanup EXIT INT
 
+# Read STDIN from the socket to pinentry-tmux STDOUT.
+cat <"$PINENTRY_TMUX_STDIN" &
+pid_in_sock=$!
+
 # Create the popup.
+pid_pinentry_tmux=$$
 ({
+	# Capture all the exported environment variables.
+	# These will be forwarded to the popup.
+	envs=()
+	while read -r envvar; do
+		envs+=(-e "$envvar")
+	done < <(env)
+
+	# Create the popup.
 	tmux display-popup -E \
 		-d "$(pwd)" \
+		"${envs[@]}" \
 		-e "PINENTRY_TMUX_POPUP=1" \
 		-e "PINENTRY_TMUX_PROGRAM=$PINENTRY_TMUX_PROGRAM" \
 		-e "PINENTRY_TMUX_STDIN=$PINENTRY_TMUX_STDOUT" \
@@ -75,22 +97,17 @@ trap cleanup EXIT INT
 		-s 'fg=#0066aa bg=0' \
 		-S 'fg=#0066ff' \
 		-b 'double' \
-		"$0"
-}) 0>&- &
+		"$0" || true
+
+	# Kill everything except the parent process.
+	kill -INT $(ps -o pid -g $$ | sed '1d' | grep -Fv "$$") &>/dev/null || true
+}) 0>&- &>/dev/null &
 pid_popup=$!
 
-# Read STDIN from the socket.
-cat <"$PINENTRY_TMUX_STDIN" &
-pid_in_sock=$!
-
-# Write STDOUT to the socket.
+# Write STDOUT from pinentry-tmux to the socket STDIN.
 cat >"$PINENTRY_TMUX_STDOUT"
 
 # Wait for the real pinentry to finish.
 wait "$pid_in_sock"
 wait "$pid_popup"
-
-# Clean up the files.
-rm "$PINENTRY_TMUX_STDOUT"
-rmdir "$tempdir"
 

@@ -99,8 +99,17 @@ pid_pinentry_tmux=$$
 		-b 'double' \
 		"$0" || true
 
-	# Kill everything except the parent process.
-	kill -INT $(ps -o pid -g $$ | sed '1d' | grep -Fv "$$") &>/dev/null || true
+	# Kill everything except the parent process (notably, cat).
+	# This prevents the script from hanging while piping data.
+	kill -INT $({
+		{
+			if ps --version &>/dev/null; then
+				ps -o pid --ppid=$$  # GNU ps
+			else
+				ps -o pid -g $$      # BSD ps
+			fi
+		} | sed '1d' | grep -Fv "$$"
+	}) || true
 }) 0>&- &>/dev/null &
 pid_popup=$!
 

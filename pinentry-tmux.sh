@@ -48,7 +48,7 @@ if [ -z "${PINENTRY_TMUX_PROGRAM:-}" ]; then
 fi
 
 # If TMUX is not running, then call the pinentry program directly.
-if [[ -z "${TMUX:-}" ]] && ! tmux display-message -p '' &>/dev/null; then
+if [[ -z "${TMUX:-}" ]] || ! tmux display-message -p '' &>/dev/null; then
 	"$PINENTRY_TMUX_PROGRAM"
 	exit $?
 fi

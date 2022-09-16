@@ -48,7 +48,7 @@ if [ -z "${PINENTRY_TMUX_PROGRAM:-}" ]; then
 fi
 
 # If TMUX is not running, then call the pinentry program directly.
-if [[ -z "${TMUX:-}" ]] || ! tmux display-message -p '' &>/dev/null; then
+if ! tmux display-message -p '' &>/dev/null; then
 	"$PINENTRY_TMUX_PROGRAM" "$@"
 	exit $?
 fi
@@ -114,7 +114,15 @@ pid_pinentry_tmux=$$
 pid_popup=$!
 
 # Write STDOUT from pinentry-tmux to the socket STDIN.
-cat >"$PINENTRY_TMUX_STDOUT"
+# A couple options will need to be intercepted for this to work properly.
+exec 3>"$PINENTRY_TMUX_STDOUT"
+while IFS='' read -r line; do
+	case "$line" in
+		"OPTION ttyname="*) printf "OK\n"; continue ;;
+		"GETINFO flavor"*) printf "D pinentry-tmux\nOK\n"; continue ;;
+		*) printf "%s\n" "$line" 1>&3 ;;
+	esac
+done
 
 # Wait for the real pinentry to finish.
 wait "$pid_in_sock"

@@ -13,7 +13,7 @@ if [[ "${PINENTRY_TMUX_POPUP:-}" = 1 ]]; then
 	unset TMUX
 
 	# Call the real pinentry.
-	"${PINENTRY_TMUX_PINENTRY}" --ttyname="${popup_tty}"
+	"${PINENTRY_TMUX_PROGRAM}" --ttyname="${popup_tty}"
 	result=$?
 
 	rm "${PINENTRY_TMUX_STDOUT}"
@@ -23,20 +23,25 @@ fi
 # -----------------------------------------------------------------------------
 # pinentry-tmux
 # -----------------------------------------------------------------------------
-
-# Get the correct pinentry program
 set -euo pipefail
-while read -r pinentry_program; do
-	if [[ "$pinentry_program" = "$0" ]]; then
-		continue
-	fi
 
-	break
-done < <(which -a pinentry)
+# If a pinentry program has not already been specified via the 
+# PINENTRY_TMUX_PROGRAMG environment variable, look within the path for any
+# executable named "pinentry".
+if [ -z "${PINENTRY_TMUX_PROGRAM:-}" ]; then
+	while read -r pinentry_program; do
+		if [[ "$pinentry_program" = "$0" || ! -x "$pinentry_program" ]]; then
+			continue
+		fi
+
+		PINENTRY_TMUX_PROGRAM="$pinentry_program"
+		break
+	done < <(which -a pinentry)
+fi
 
 # If TMUX is not running, then call the pinentry program directly.
 if [[ -z "${TMUX:-}" ]] && ! tmux display-message -p '' &>/dev/null; then
-	"$pinentry_program"
+	"$PINENTRY_TMUX_PROGRAM"
 	exit $?
 fi
 
@@ -63,7 +68,7 @@ trap cleanup EXIT INT
 	tmux display-popup -E \
 		-d "$(pwd)" \
 		-e "PINENTRY_TMUX_POPUP=1" \
-		-e "PINENTRY_TMUX_PINENTRY=$pinentry_program" \
+		-e "PINENTRY_TMUX_PROGRAM=$PINENTRY_TMUX_PROGRAM" \
 		-e "PINENTRY_TMUX_STDIN=$PINENTRY_TMUX_STDOUT" \
 		-e "PINENTRY_TMUX_STDOUT=$PINENTRY_TMUX_STDIN" \
 		-T "[ pinentry-tmux ]" \

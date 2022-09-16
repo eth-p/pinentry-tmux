@@ -42,7 +42,7 @@ fi
 
 # Make a FIFO to communicate with the popup.
 tempdir=$(mktemp -u)
-mkdir "$tempdir" -m 700
+mkdir -m 700 "$tempdir"
 PINENTRY_TMUX_STDOUT="$tempdir/r2t.sock"; mkfifo "$PINENTRY_TMUX_STDOUT"
 PINENTRY_TMUX_STDIN="$tempdir/t2r.sock";  mkfifo "$PINENTRY_TMUX_STDIN"
 

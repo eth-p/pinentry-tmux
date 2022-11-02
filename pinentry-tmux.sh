@@ -112,6 +112,20 @@ pid_in_sock=$!
 	while read -r envvar; do
 		envs+=(-e "$envvar")
 	done < <(env)
+
+	# Determine the ideal height for a popup.
+	DESIRED_WIDTH=78
+	DESIRED_HEIGHT=18
+	read -r ACTUAL_WIDTH ACTUAL_HEIGHT \
+		< <(tmux display-message -p '#{client_width} #{client_height}')
+
+	if [[ "$ACTUAL_WIDTH" -lt "$DESIRED_WIDTH" ]]; then
+		DESIRED_WIDTH="$ACTUAL_WIDTH"
+	fi
+
+	if [[ "$ACTUAL_HEIGHT" -lt "$DESIRED_HEIGHT" ]]; then
+		DESIRED_HEIGHT="$ACTUAL_HEIGHT"
+	fi
 	
 	# Create the popup.
 	tmux display-popup -E \
@@ -124,7 +138,8 @@ pid_in_sock=$!
 		-s 'fg=#0066aa bg=0' \
 		-S 'fg=#0066ff' \
 		-B \
-		-w 78 -h 18 \
+		-w "$DESIRED_WIDTH" \
+		-h "$DESIRED_HEIGHT" \
 		"$0" || true
 
 }) 0>&- &>/dev/null &

@@ -84,7 +84,7 @@ pid_pinentry_tmux=$$
 	while read -r envvar; do
 		envs+=(-e "$envvar")
 	done < <(env)
-
+	
 	# Create the popup.
 	tmux display-popup -E \
 		-d "$(pwd)" \
@@ -96,7 +96,8 @@ pid_pinentry_tmux=$$
 		-T "[ pinentry-tmux ]" \
 		-s 'fg=#0066aa bg=0' \
 		-S 'fg=#0066ff' \
-		-b 'double' \
+		-B \
+		-w 78 -h 18 \
 		"$0" || true
 
 	# Kill everything except the parent process (notably, cat).

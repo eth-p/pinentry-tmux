@@ -113,17 +113,19 @@ popup_envs() {
 	done < <(env -0)
 }
 
-# Start the popup on the tmux client attached to the given tty.
+# Start the popup on a tmux client attached to the session of the pane that
+# owns the given tty. The tty of gpg is a pane tty, not a client tty.
 start_popup() {
-	local tty="$1" client_name client_tty envs=() fallback=0
+	local tty="$1" client_name client_session session envs=() fallback=0
 
 	if [[ -n "$tty" ]]; then
-		while IFS=$'\t' read -r client_tty client_name; do
-			if [[ "$client_tty" = "$tty" ]]; then
+		session=$(tmux list-panes -a -F $'#{pane_tty}\t#{session_id}' | awk -F'\t' -v tty="$tty" '$1 == tty { print $2; exit }')
+		while IFS=$'\t' read -r client_name client_session; do
+			if [[ -n "$session" && "$client_session" = "$session" ]]; then
 				popup_client=(-c "$client_name")
 				break
 			fi
-		done < <(tmux list-clients -F $'#{client_tty}\t#{client_name}')
+		done < <(tmux list-clients -F $'#{client_name}\t#{session_id}')
 
 		if [[ "${#popup_client[@]}" -eq 0 ]]; then fallback=1; fi
 	fi

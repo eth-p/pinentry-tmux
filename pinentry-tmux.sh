@@ -1,15 +1,24 @@
 #!/usr/bin/env bash
-# -----------------------------------------------------------------------------
-# If called from within the popup, run the real pinentry program and
-# forward its input and output to the caller pinentry-tmux script.
-# -----------------------------------------------------------------------------
+# Function that kills all children of a process, except the process itself.
+# Works with both BSD and GNU coreutils.
+rkill() {
+	ps -A -o pid= -o ppid= \
+	| awk -v parent="$1" '$2 == parent { print $1 }' \
+	| xargs kill -INT \
+	|| true
+}
+
+# Resolve the path of this script, so that it can be compared with the
+# candidates found in the PATH (symlinks included) and run in the popup.
+self="$(realpath "$0")"
 
 # If a pinentry program has not already been specified via the 
 # PINENTRY_TMUX_PROGRAM environment variable, look within the path for an
-# executable named "pinentry".
+# executable named "pinentry". Candidates that resolve to this script are
+# skipped to prevent infinite recursion.
 if [ -z "${PINENTRY_TMUX_PROGRAM:-}" ]; then
 	while read -r pinentry_program; do
-		if [[ "$pinentry_program" = "$0" || ! -x "$pinentry_program" ]]; then
+		if [[ ! -x "$pinentry_program" || "$(realpath "$pinentry_program")" = "$self" ]]; then
 			continue
 		fi
 
@@ -18,11 +27,20 @@ if [ -z "${PINENTRY_TMUX_PROGRAM:-}" ]; then
 	done < <(which -a pinentry)
 fi
 
-# If PINENTRY_TMUX_POPUP is set to "1", we're (normally) running this within
-# the tmux popup. Run the real pinentry here and forward its output back to
-# the original pinentry-tmux process.
+if [ -z "${PINENTRY_TMUX_PROGRAM:-}" ]; then
+	echo "pinentry-tmux: no pinentry program found" 1>&2
+	exit 1
+fi
+
+# -----------------------------------------------------------------------------
+# If called from within the popup, run the real pinentry program and
+# forward its input and output to the caller pinentry-tmux script.
+# -----------------------------------------------------------------------------
 if [[ -n "${PINENTRY_TMUX_CALLER:-}" ]]; then
 	popup_tty="$(tty)"
+
+	# Tell the caller that the popup has started.
+	: > "${PINENTRY_TMUX_STDIN%/*}/started"
 
 	# Redirect STDIN and STDOUT.
 	exec 1>"${PINENTRY_TMUX_STDOUT}" 0<"${PINENTRY_TMUX_STDIN}"
@@ -58,37 +76,20 @@ if ! tmux display-message -p "#{client_name}" &>/dev/null; then
 fi
 
 # Make a pair of FIFOs to communicate with the popup.
-fifodir=$(mktemp -u)
-mkdir -m 700 "$fifodir"
+fifodir=$(mktemp -d)
 PINENTRY_TMUX_STDOUT="$fifodir/r2t.sock"; mkfifo "$PINENTRY_TMUX_STDOUT"
 PINENTRY_TMUX_STDIN="$fifodir/t2r.sock";  mkfifo "$PINENTRY_TMUX_STDIN"
-
-# Function that kills all children of a process, except the process itself.
-# Works with both BSD and GNU coreutils.
-rkill() {
-	{
-		if ps --version &>/dev/null; then
-			ps -o pid --ppid="$1"  # GNU ps
-		else
-			ps -o pid -g "$1"      # BSD ps
-		fi
-	} \
-	| sed $'1d; s/[ \t]//g' \
-	| grep -Fv "$1" \
-	| xargs kill -INT \
-	|| true
-}
+popup_started="$fifodir/started"
+popup_client=()
+script_args=("$@")
 
 # Traps and cleanup.
 cleanup() {
-	if [ -e "$PINENTRY_TMUX_STDOUT" ]; then rm "$PINENTRY_TMUX_STDOUT"; fi 
-	if [ -e "$PINENTRY_TMUX_STDIN"  ]; then rm "$PINENTRY_TMUX_STDIN";  fi
+	rm -f "$PINENTRY_TMUX_STDOUT" "$PINENTRY_TMUX_STDIN" "$popup_started"
 	if [ -d "$fifodir" ]; then rmdir "$fifodir"; fi
 
-	if [ -n "${pid_popup:-}" ]   && kill -0 "$pid_popup" &>/dev/null; then tmux display-popup -C; fi
+	if [ -n "${pid_popup:-}" ]   && kill -0 "$pid_popup" &>/dev/null; then tmux display-popup "${popup_client[@]}" -C; fi
 	if [ -n "${pid_in_sock:-}" ] && kill -0 "$pid_in_sock" &>/dev/null; then kill -INT "$pid_in_sock"; fi
-
-	echo "BYE"
 }
 
 abort() {
@@ -100,63 +101,126 @@ abort() {
 trap abort USR1
 trap cleanup EXIT INT
 
-# Read STDIN from the socket to pinentry-tmux STDOUT.
-cat <"$PINENTRY_TMUX_STDIN" &
-pid_in_sock=$!
+# Only forward the environment variables that the popup needs. Forwarding
+# everything would expose them in the argument list of the tmux client.
+popup_envs() {
+	local name
+	while IFS='=' read -r -d '' name value; do
+		case "$name" in
+			TERM|LANG|LC_*|HOME|PATH|GPG_TTY|PINENTRY_USER_DATA|PINENTRY_TMUX_PROGRAM|DISPLAY|WAYLAND_DISPLAY|XAUTHORITY|XDG_RUNTIME_DIR|XDG_SESSION_TYPE|XDG_CURRENT_DESKTOP|DBUS_SESSION_BUS_ADDRESS)
+				printf '%s\0' "-e" "$name=$value" ;;
+		esac
+	done < <(env -0)
+}
 
-# Create the popup.
-({
-	# Capture all the exported environment variables.
-	# These will be forwarded to the popup.
-	envs=()
-	while read -r envvar; do
-		envs+=(-e "$envvar")
-	done < <(env)
+# Start the popup on a tmux client attached to the session of the pane that
+# owns the given tty. The tty of gpg is a pane tty, not a client tty.
+start_popup() {
+	local tty="$1" client_name client_session session envs=() fallback=0
 
-	# Determine the ideal height for a popup.
-	DESIRED_WIDTH=78
-	DESIRED_HEIGHT=18
-	read -r ACTUAL_WIDTH ACTUAL_HEIGHT \
-		< <(tmux display-message -p '#{client_width} #{client_height}')
+	if [[ -n "$tty" ]]; then
+		session=$(tmux list-panes -a -F $'#{pane_tty}\t#{session_id}' | awk -F'\t' -v tty="$tty" '$1 == tty { print $2; exit }')
+		while IFS=$'\t' read -r client_name client_session; do
+			if [[ -n "$session" && "$client_session" = "$session" ]]; then
+				popup_client=(-c "$client_name")
+				break
+			fi
+		done < <(tmux list-clients -F $'#{client_name}\t#{session_id}')
 
-	if [[ "$ACTUAL_WIDTH" -lt "$DESIRED_WIDTH" ]]; then
-		DESIRED_WIDTH="$ACTUAL_WIDTH"
+		if [[ "${#popup_client[@]}" -eq 0 ]]; then fallback=1; fi
 	fi
 
-	if [[ "$ACTUAL_HEIGHT" -lt "$DESIRED_HEIGHT" ]]; then
-		DESIRED_HEIGHT="$ACTUAL_HEIGHT"
-	fi
-	
-	# Create the popup.
-	tmux display-popup -E \
-		-d "$(pwd)" \
-		"${envs[@]}" \
-		-e "PINENTRY_TMUX_CALLER=$pid_pinentry_tmux" \
-		-e "PINENTRY_TMUX_STDIN=$PINENTRY_TMUX_STDOUT" \
-		-e "PINENTRY_TMUX_STDOUT=$PINENTRY_TMUX_STDIN" \
-		-T "[ pinentry-tmux ]" \
-		-s 'fg=#0066aa bg=0' \
-		-S 'fg=#0066ff' \
-		-B \
-		-w "$DESIRED_WIDTH" \
-		-h "$DESIRED_HEIGHT" \
-		"$0" || true
+	# Skip the greeting of the real pinentry and the replies to the replayed
+	# options (and ttyname when falling back), because we already replied.
 
-}) 0>&- &>/dev/null &
-pid_popup=$!
+	{
+		for ((i = 0; i <= fallback + ${#pending[@]}; i++)); do IFS='' read -r _; done
+		cat
+	} <"$PINENTRY_TMUX_STDIN" &
+	pid_in_sock=$!
+
+	exec 3<>"$PINENTRY_TMUX_STDOUT"
+	started=1
+
+	local option
+	for option in "${pending[@]}"; do printf "%s\n" "$option" 1>&3; done
+
+	# No tmux client owns the tty, so run the real pinentry on that tty.
+	if [[ "$fallback" -eq 1 ]]; then
+		"$PINENTRY_TMUX_PROGRAM" "${script_args[@]}" <"$PINENTRY_TMUX_STDOUT" >"$PINENTRY_TMUX_STDIN" &
+		pid_popup=$!
+		printf "OPTION ttyname=%s\n" "$tty" 1>&3
+		return
+	fi
+
+	({
+		while IFS='' read -r -d '' arg; do
+			envs+=("$arg")
+		done < <(popup_envs)
+
+		# Determine the ideal height for a popup.
+		DESIRED_WIDTH=78
+		DESIRED_HEIGHT=18
+		read -r ACTUAL_WIDTH ACTUAL_HEIGHT \
+			< <(tmux display-message "${popup_client[@]}" -p '#{client_width} #{client_height}')
+
+		if [[ "$ACTUAL_WIDTH" -lt "$DESIRED_WIDTH" ]]; then
+			DESIRED_WIDTH="$ACTUAL_WIDTH"
+		fi
+
+		if [[ "$ACTUAL_HEIGHT" -lt "$DESIRED_HEIGHT" ]]; then
+			DESIRED_HEIGHT="$ACTUAL_HEIGHT"
+		fi
+
+		tmux display-popup -E \
+			"${popup_client[@]}" \
+			-d "$(pwd)" \
+			"${envs[@]}" \
+			-e "PINENTRY_TMUX_CALLER=$pid_pinentry_tmux" \
+			-e "PINENTRY_TMUX_STDIN=$PINENTRY_TMUX_STDOUT" \
+			-e "PINENTRY_TMUX_STDOUT=$PINENTRY_TMUX_STDIN" \
+			-T "[ pinentry-tmux ]" \
+			-B \
+			-w "$DESIRED_WIDTH" \
+			-h "$DESIRED_HEIGHT" \
+			"$self" || true
+
+		# If the popup never ran, tell the main process to give up.
+		if [ ! -e "$popup_started" ]; then
+			kill -USR1 "$pid_pinentry_tmux"
+		fi
+	}) 0>&- &>/dev/null &
+	pid_popup=$!
+}
 
 # Write STDOUT from pinentry-tmux to the socket STDIN.
 # A couple options will need to be intercepted for this to work properly.
-exec 3>"$PINENTRY_TMUX_STDOUT"
+# The popup is started once the tty is known, so the correct client is used.
+started=0
+pending=()
+printf "OK Pleased to meet you\n"
 while IFS='' read -r line; do
 	case "$line" in
-		"OPTION ttyname="*) printf "OK\n"; continue ;;
+		"OPTION ttyname="*)
+			printf "OK\n"
+			if [[ "$started" -eq 0 ]]; then start_popup "${line#OPTION ttyname=}"; fi
+			continue ;;
 		"GETINFO flavor"*) printf "D pinentry-tmux\nOK\n"; continue ;;
-		*) printf "%s\n" "$line" 1>&3 ;;
 	esac
+
+	if [[ "$started" -eq 0 ]]; then
+		case "$line" in
+			OPTION*) pending+=("$line"); printf "OK\n"; continue ;;
+		esac
+		start_popup ""
+	fi
+
+	printf "%s\n" "$line" 1>&3
 done
 
 # Wait for the real pinentry to finish.
-wait "$pid_in_sock"
-wait "$pid_popup"
-
+if [[ "$started" -eq 1 ]]; then
+	exec 3>&-
+	wait "$pid_in_sock"
+	wait "$pid_popup"
+fi

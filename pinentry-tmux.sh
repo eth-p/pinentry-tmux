@@ -128,16 +128,20 @@ start_popup() {
 		if [[ "${#popup_client[@]}" -eq 0 ]]; then fallback=1; fi
 	fi
 
-	# Skip the greeting of the real pinentry (and the reply to ttyname when
-	# falling back), because we already sent ours.
+	# Skip the greeting of the real pinentry and the replies to the replayed
+	# options (and ttyname when falling back), because we already replied.
+
 	{
-		for ((i = 0; i <= fallback; i++)); do IFS='' read -r _; done
+		for ((i = 0; i <= fallback + ${#pending[@]}; i++)); do IFS='' read -r _; done
 		cat
 	} <"$PINENTRY_TMUX_STDIN" &
 	pid_in_sock=$!
 
 	exec 3<>"$PINENTRY_TMUX_STDOUT"
 	started=1
+
+	local option
+	for option in "${pending[@]}"; do printf "%s\n" "$option" 1>&3; done
 
 	# No tmux client owns the tty, so run the real pinentry on that tty.
 	if [[ "$fallback" -eq 1 ]]; then
@@ -193,6 +197,7 @@ start_popup() {
 # A couple options will need to be intercepted for this to work properly.
 # The popup is started once the tty is known, so the correct client is used.
 started=0
+pending=()
 printf "OK Pleased to meet you\n"
 while IFS='' read -r line; do
 	case "$line" in
@@ -203,7 +208,12 @@ while IFS='' read -r line; do
 		"GETINFO flavor"*) printf "D pinentry-tmux\nOK\n"; continue ;;
 	esac
 
-	if [[ "$started" -eq 0 ]]; then start_popup ""; fi
+	if [[ "$started" -eq 0 ]]; then
+		case "$line" in
+			OPTION*) pending+=("$line"); printf "OK\n"; continue ;;
+		esac
+		start_popup ""
+	fi
 
 	printf "%s\n" "$line" 1>&3
 done

@@ -107,7 +107,7 @@ popup_envs() {
 	local name
 	while IFS='=' read -r -d '' name value; do
 		case "$name" in
-			TERM|LANG|LC_*|HOME|PATH|GPG_TTY|PINENTRY_USER_DATA|PINENTRY_TMUX_PROGRAM|DISPLAY|WAYLAND_DISPLAY|XDG_RUNTIME_DIR|DBUS_SESSION_BUS_ADDRESS)
+			TERM|LANG|LC_*|HOME|PATH|GPG_TTY|PINENTRY_USER_DATA|PINENTRY_TMUX_PROGRAM|DISPLAY|WAYLAND_DISPLAY|XAUTHORITY|XDG_RUNTIME_DIR|XDG_SESSION_TYPE|XDG_CURRENT_DESKTOP|DBUS_SESSION_BUS_ADDRESS)
 				printf '%s\0' "-e" "$name=$value" ;;
 		esac
 	done < <(env -0)
@@ -180,8 +180,6 @@ start_popup() {
 			-e "PINENTRY_TMUX_STDIN=$PINENTRY_TMUX_STDOUT" \
 			-e "PINENTRY_TMUX_STDOUT=$PINENTRY_TMUX_STDIN" \
 			-T "[ pinentry-tmux ]" \
-			-s 'fg=#0066aa bg=0' \
-			-S 'fg=#0066ff' \
 			-B \
 			-w "$DESIRED_WIDTH" \
 			-h "$DESIRED_HEIGHT" \
